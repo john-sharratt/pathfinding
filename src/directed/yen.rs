@@ -1,10 +1,13 @@
 //! Compute k-shortest paths using [Yen's search
 //! algorithm](https://en.wikipedia.org/wiki/Yen%27s_algorithm).
 use num_traits::Zero;
+use rustc_hash::FxHasher;
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::hash::BuildHasher;
+use std::hash::BuildHasherDefault;
 use std::hash::Hash;
 
 use super::dijkstra::dijkstra_internal;
@@ -97,8 +100,8 @@ where
 /// ```
 pub fn yen<N, C, FN, IN, FS>(
     start: &N,
-    mut successors: FN,
-    mut success: FS,
+    successors: FN,
+    success: FS,
     k: usize,
 ) -> Vec<(Vec<N>, C)>
 where
@@ -108,11 +111,44 @@ where
     IN: IntoIterator<Item = (N, C)>,
     FS: FnMut(&N) -> bool,
 {
-    let Some((n, c)) = dijkstra_internal(start, &mut successors, &mut success) else {
+    yen_with_hasher(start, successors, success, k, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Compute the k-shortest paths using the [Yen's search
+/// algorithm](https://en.wikipedia.org/wiki/Yen%27s_algorithm) with a custom hasher.
+///
+/// The `k`-shortest paths starting from `start` up to a node for which `success` returns `true`
+/// are computed along with their total cost. The result is return as a vector of (path, cost).
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost of moving from
+///   the node to the successor. Costs MUST be positive.
+/// - `success` checks weather the goal has been reached.
+/// - `k` is the amount of paths requests, including the shortest one.
+///
+/// The returned paths include both the start and the end node and are ordered by their costs
+/// starting with the lowest cost. If there exist less paths than requested, only the existing
+/// ones (if any) are returned.
+pub fn yen_with_hasher<N, C, FN, IN, FS, H>(
+    start: &N,
+    mut successors: FN,
+    mut success: FS,
+    k: usize,
+    hasher: H
+) -> Vec<(Vec<N>, C)>
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher + Clone + Default,
+{
+    let Some((n, c)) = dijkstra_internal(start, &mut successors, &mut success, hasher.clone()) else {
         return vec![];
     };
 
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::with_hasher(hasher.clone());
     // A vector containing our paths.
     let mut routes = vec![Path { nodes: n, cost: c }];
     // A min-heap to store our lowest-cost route candidate
@@ -129,7 +165,7 @@ where
             let spur_node = &previous[i];
             let root_path = &previous[0..i];
 
-            let mut filtered_edges = HashSet::new();
+            let mut filtered_edges = HashSet::with_hasher(hasher.clone());
             for path in &routes {
                 if path.nodes.len() > i + 1
                     && &path.nodes[0..i] == root_path
@@ -138,7 +174,7 @@ where
                     filtered_edges.insert((&path.nodes[i], &path.nodes[i + 1]));
                 }
             }
-            let filtered_nodes: HashSet<&N> = HashSet::from_iter(root_path);
+            let filtered_nodes: HashSet<&N, H> = HashSet::from_iter(root_path);
             // We are creating a new successor function that will not return the
             // filtered edges and nodes that routes already used.
             let mut filtered_successor = |n: &N| {
@@ -152,7 +188,7 @@ where
 
             // Let us find the spur path from the spur node to the sink using.
             if let Some((spur_path, _)) =
-                dijkstra_internal(spur_node, &mut filtered_successor, &mut success)
+                dijkstra_internal(spur_node, &mut filtered_successor, &mut success, hasher.clone())
             {
                 let nodes: Vec<N> = root_path.iter().cloned().chain(spur_path).collect();
                 // If we have found the same path before, we will not add it.

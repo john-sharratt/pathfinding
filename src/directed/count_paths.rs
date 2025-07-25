@@ -1,20 +1,21 @@
 //! Count the total number of possible paths to reach a destination.
 
-use std::hash::Hash;
+use std::{collections::HashMap, hash::{BuildHasher, Hash}};
 
 use rustc_hash::FxHashMap;
 
-fn cached_count_paths<T, FN, IN, FS>(
+fn cached_count_paths<T, FN, IN, FS, H>(
     start: T,
     successors: &mut FN,
     success: &mut FS,
-    cache: &mut FxHashMap<T, usize>,
+    cache: &mut HashMap<T, usize, H>,
 ) -> usize
 where
     T: Eq + Hash,
     FN: FnMut(&T) -> IN,
     IN: IntoIterator<Item = T>,
     FS: FnMut(&T) -> bool,
+    H: BuildHasher,
 {
     if let Some(&n) = cache.get(&start) {
         return n;

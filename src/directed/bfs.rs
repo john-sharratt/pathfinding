@@ -2,9 +2,11 @@
 //! algorithm](https://en.wikipedia.org/wiki/Breadth-first_search).
 
 use super::reverse_path;
-use crate::{FxIndexMap, FxIndexSet, NodeRefs};
+use crate::NodeRefs;
 use indexmap::map::Entry::Vacant;
-use std::hash::Hash;
+use indexmap::{IndexMap, IndexSet};
+use rustc_hash::FxHasher;
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::iter::FusedIterator;
 
 /// Compute a shortest path using the [breadth-first search
@@ -70,20 +72,49 @@ where
     IN: IntoIterator<Item = N>,
     FS: FnMut(&N) -> bool,
 {
-    bfs_core(&start.into(), successors, success, true)
+    bfs_with_hasher(start, successors, success, BuildHasherDefault::<FxHasher>::default())
 }
 
-fn bfs_core<'a, N, FN, IN, FS>(
+/// Compute a shortest path using the [breadth-first search
+/// algorithm](https://en.wikipedia.org/wiki/Breadth-first_search) with a custom hasher.
+///
+/// The shortest path starting from `start` up to a node for which `success` returns `true` is
+/// computed and returned in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+pub fn bfs_with_hasher<'a, N, S, FN, IN, FS, H>(start: S, successors: FN, success: FS, hasher: H) -> Option<Vec<N>>
+where
+    N: Eq + Hash + Clone + 'a,
+    S: Into<NodeRefs<'a, N>>,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = N>,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher,
+{
+    bfs_core(&start.into(), successors, success, true, hasher)
+}
+
+fn bfs_core<'a, N, FN, IN, FS, H>(
     start: &NodeRefs<'a, N>,
     mut successors: FN,
     mut success: FS,
     check_first: bool,
+    hasher: H
 ) -> Option<Vec<N>>
 where
     N: Eq + Hash + Clone + 'a,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
     FS: FnMut(&N) -> bool,
+    H: BuildHasher,
 {
     if check_first {
         for start_node in start {
@@ -93,7 +124,7 @@ where
         }
     }
 
-    let mut parents: FxIndexMap<N, usize> = FxIndexMap::default();
+    let mut parents: IndexMap<N, usize, H> = IndexMap::with_hasher(hasher);
     parents.extend(start.into_iter().map(|n| (n.clone(), usize::MAX)));
 
     let mut i = 0;
@@ -128,8 +159,28 @@ where
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
 {
+    bfs_loop_with_hasher(start, successors, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Return one of the shortest loop from start to start if it exists, `None` otherwise using
+/// a custom hasher.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node.
+///
+/// Except the start node which will be included both at the beginning and the end of
+/// the path, a node will never be included twice in the path as determined
+/// by the `Eq` relationship.
+pub fn bfs_loop_with_hasher<'a, N, S, FN, IN, H>(start: S, successors: FN, hasher: H) -> Option<Vec<N>>
+where
+    N: Eq + Hash + Clone + 'a,
+    S: Into<NodeRefs<'a, N>>,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = N>,
+    H: BuildHasher,
+{
     let start = start.into();
-    bfs_core(&start, successors, |n| start.contains(n), false)
+    bfs_core(&start, successors, |n| start.contains(n), false, hasher)
 }
 
 /// Compute a shortest path using the [breadth-first search
@@ -187,12 +238,53 @@ where
     FNP: Fn(&N) -> IN,
     IN: IntoIterator<Item = N>,
 {
+    bfs_bidirectional_with_hasher(start, end, successors_fn, predecessors_fn, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Compute a shortest path using the [breadth-first search
+/// algorithm](https://en.wikipedia.org/wiki/Breadth-first_search) with
+/// [bidirectional search](https://en.wikipedia.org/wiki/Bidirectional_search) with a custom hasher.
+///
+/// Bidirectional search runs two simultaneous searches: one forward from the start,
+/// and one backward from the end, stopping when the two meet. In many cases this gives
+/// a faster result than searching only in a single direction.
+///
+/// The shortest path starting from `start` up to a node `end` is
+/// computed and returned in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `end` is the end node.
+/// - `successors_fn` returns a list of successors for a given node.
+/// - `predecessors_fn` returns a list of predecessors for a given node. For an undirected graph
+///   this will be the same as `successors_fn`, however for a directed graph this will be different.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+#[allow(clippy::missing_panics_doc)]
+pub fn bfs_bidirectional_with_hasher<'a, N, S, E, FNS, FNP, IN, H>(
+    start: S,
+    end: E,
+    successors_fn: FNS,
+    predecessors_fn: FNP,
+    hasher: H
+) -> Option<Vec<N>>
+where
+    N: Eq + Hash + Clone + 'a,
+    E: Into<NodeRefs<'a, N>>,
+    S: Into<NodeRefs<'a, N>>,
+    FNS: Fn(&N) -> IN,
+    FNP: Fn(&N) -> IN,
+    IN: IntoIterator<Item = N>,
+    H: BuildHasher + Clone
+{
     let start = start.into();
     let end = end.into();
 
-    let mut predecessors: FxIndexMap<N, Option<usize>> = FxIndexMap::default();
+    let mut predecessors: IndexMap<N, Option<usize>, H> = IndexMap::with_hasher(hasher.clone());
     predecessors.extend(start.into_iter().cloned().map(|n| (n, None)));
-    let mut successors: FxIndexMap<N, Option<usize>> = FxIndexMap::default();
+    let mut successors: IndexMap<N, Option<usize>, H> = IndexMap::with_hasher(hasher);
     successors.extend(end.into_iter().cloned().map(|n| (n, None)));
 
     let mut i_forwards = 0;
@@ -283,13 +375,26 @@ where
 /// assert_eq!(it.next(), Some(8));  // ((1*2)*2)*2
 /// assert_eq!(it.next(), Some(12)); // ((1*2)*2)*3
 /// ```
-pub fn bfs_reach<N, FN, IN>(start: N, successors: FN) -> BfsReachable<N, FN>
+pub fn bfs_reach<N, FN, IN>(start: N, successors: FN) -> BfsReachable<N, FN, BuildHasherDefault<FxHasher>>
 where
     N: Eq + Hash + Clone,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
 {
-    let mut seen = FxIndexSet::default();
+    bfs_reach_with_hasher(start, successors, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Visit all nodes that are reachable from a start node. The node will be visited
+/// in BFS order, starting from the `start` node and following the order returned
+/// by the `successors` function using a custom hasher.
+pub fn bfs_reach_with_hasher<N, FN, IN, H>(start: N, successors: FN, hasher: H) -> BfsReachable<N, FN, H>
+where
+    N: Eq + Hash + Clone,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = N>,
+    H: BuildHasher,
+{
+    let mut seen = IndexSet::with_hasher(hasher);
     seen.insert(start);
     BfsReachable {
         i: 0,
@@ -299,13 +404,13 @@ where
 }
 
 /// Struct returned by [`bfs_reach`].
-pub struct BfsReachable<N, FN> {
+pub struct BfsReachable<N, FN, H> {
     i: usize,
-    seen: FxIndexSet<N>,
+    seen: IndexSet<N, H>,
     successors: FN,
 }
 
-impl<N, FN> BfsReachable<N, FN> {
+impl<N, FN, H> BfsReachable<N, FN, H> {
     /// Return a lower bound on the number of remaining reachable
     /// nodes. Not all nodes are necessarily known in advance, and
     /// new reachable nodes may be discovered while using the iterator.
@@ -314,11 +419,12 @@ impl<N, FN> BfsReachable<N, FN> {
     }
 }
 
-impl<N, FN, IN> Iterator for BfsReachable<N, FN>
+impl<N, FN, IN, H> Iterator for BfsReachable<N, FN, H>
 where
     N: Eq + Hash + Clone,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
+    H: BuildHasher,
 {
     type Item = N;
 
@@ -332,10 +438,11 @@ where
     }
 }
 
-impl<N, FN, IN> FusedIterator for BfsReachable<N, FN>
+impl<N, FN, IN, H> FusedIterator for BfsReachable<N, FN, H>
 where
     N: Eq + Hash + Clone,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
+    H: BuildHasher,
 {
 }

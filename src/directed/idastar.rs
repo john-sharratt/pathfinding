@@ -3,7 +3,8 @@
 
 use indexmap::IndexSet;
 use num_traits::Zero;
-use std::{hash::Hash, ops::ControlFlow};
+use rustc_hash::FxHasher;
+use std::{hash::{BuildHasher, BuildHasherDefault, Hash}, ops::ControlFlow};
 
 /// Compute a shortest path using the [IDA* search
 /// algorithm](https://en.wikipedia.org/wiki/Iterative_deepening_A*).
@@ -73,9 +74,9 @@ use std::{hash::Hash, ops::ControlFlow};
 /// ```
 pub fn idastar<N, C, FN, IN, FH, FS>(
     start: &N,
-    mut successors: FN,
-    mut heuristic: FH,
-    mut success: FS,
+    successors: FN,
+    heuristic: FH,
+    success: FS,
 ) -> Option<(Vec<N>, C)>
 where
     N: Eq + Clone + Hash,
@@ -85,7 +86,45 @@ where
     FH: FnMut(&N) -> C,
     FS: FnMut(&N) -> bool,
 {
-    let mut path = IndexSet::from([start.clone()]);
+    idastar_with_hasher(start, successors, heuristic, success, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Compute a shortest path using the [IDA* search
+/// algorithm](https://en.wikipedia.org/wiki/Iterative_deepening_A*) with a custom hasher.
+///
+/// The shortest path starting from `start` up to a node for which `success` returns `true` is
+/// computed and returned along with its total cost, in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor. This cost must be non-negative.
+/// - `heuristic` returns an approximation of the cost from a given node to the goal. The
+///   approximation must not be greater than the real cost, or a wrong shortest path may be returned.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+pub fn idastar_with_hasher<N, C, FN, IN, FH, FS, H>(
+    start: &N,
+    mut successors: FN,
+    mut heuristic: FH,
+    mut success: FS,
+    hasher: H
+) -> Option<(Vec<N>, C)>
+where
+    N: Eq + Clone + Hash,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FH: FnMut(&N) -> C,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher,
+{
+    let mut path = IndexSet::<N, H>::with_hasher(hasher);
+    path.insert(start.clone());
 
     std::iter::repeat(())
         .try_fold(heuristic(start), |bound, ()| {
@@ -105,8 +144,8 @@ where
         .unwrap_or_default() // To avoid a missing panics section, as this always break
 }
 
-fn search<N, C, FN, IN, FH, FS>(
-    path: &mut IndexSet<N>,
+fn search<N, C, FN, IN, FH, FS, H>(
+    path: &mut IndexSet<N, H>,
     cost: C,
     bound: C,
     successors: &mut FN,
@@ -120,6 +159,7 @@ where
     IN: IntoIterator<Item = (N, C)>,
     FH: FnMut(&N) -> C,
     FS: FnMut(&N) -> bool,
+    H: BuildHasher,
 {
     let neighbs = {
         let start = &path[path.len() - 1];

@@ -2,11 +2,12 @@
 //! algorithm](https://en.wikipedia.org/wiki/Fringe_search).
 
 use super::reverse_path;
-use crate::FxIndexMap;
 use indexmap::map::Entry::{Occupied, Vacant};
+use indexmap::IndexMap;
 use num_traits::{Bounded, Zero};
+use rustc_hash::FxHasher;
 use std::collections::VecDeque;
-use std::hash::Hash;
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::mem;
 
 /// Compute a shortest path using the [Fringe search
@@ -80,9 +81,9 @@ use std::mem;
 #[expect(clippy::missing_panics_doc)]
 pub fn fringe<N, C, FN, IN, FH, FS>(
     start: &N,
-    mut successors: FN,
-    mut heuristic: FH,
-    mut success: FS,
+    successors: FN,
+    heuristic: FH,
+    success: FS,
 ) -> Option<(Vec<N>, C)>
 where
     N: Eq + Hash + Clone,
@@ -92,9 +93,47 @@ where
     FH: FnMut(&N) -> C,
     FS: FnMut(&N) -> bool,
 {
+    fringe_with_hasher(start, successors, heuristic, success, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Compute a shortest path using the [Fringe search
+/// algorithm](https://en.wikipedia.org/wiki/Fringe_search) with a custom hasher.
+///
+/// The shortest path starting from `start` up to a node for which `success` returns `true` is
+/// computed and returned along with its total cost, in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor. This cost must be non-negative.
+/// - `heuristic` returns an approximation of the cost from a given node to the goal. The
+///   approximation must not be greater than the real cost, or a wrong shortest path may be returned.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+#[expect(clippy::missing_panics_doc)]
+pub fn fringe_with_hasher<N, C, FN, IN, FH, FS, H>(
+    start: &N,
+    mut successors: FN,
+    mut heuristic: FH,
+    mut success: FS,
+    hasher: H
+) -> Option<(Vec<N>, C)>
+where
+    N: Eq + Hash + Clone,
+    C: Bounded + Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FH: FnMut(&N) -> C,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher,
+{
     let mut now = VecDeque::new();
     let mut later = VecDeque::new();
-    let mut parents: FxIndexMap<N, (usize, C)> = FxIndexMap::default();
+    let mut parents: IndexMap<N, (usize, C), H> = IndexMap::with_hasher(hasher);
     let mut flimit = heuristic(start);
     now.push_back(0);
     parents.insert(start.clone(), (usize::MAX, Zero::zero()));

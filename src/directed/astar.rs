@@ -2,10 +2,12 @@
 //! algorithm](https://en.wikipedia.org/wiki/A*_search_algorithm).
 
 use indexmap::map::Entry::{Occupied, Vacant};
+use indexmap::IndexMap;
 use num_traits::Zero;
+use rustc_hash::FxHasher;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
-use std::hash::Hash;
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 use std::iter::FusedIterator;
 
 use super::reverse_path;
@@ -80,9 +82,9 @@ use crate::FxIndexMap;
 #[expect(clippy::missing_panics_doc)]
 pub fn astar<N, C, FN, IN, FH, FS>(
     start: &N,
-    mut successors: FN,
-    mut heuristic: FH,
-    mut success: FS,
+    successors: FN,
+    heuristic: FH,
+    success: FS,
 ) -> Option<(Vec<N>, C)>
 where
     N: Eq + Hash + Clone,
@@ -92,13 +94,57 @@ where
     FH: FnMut(&N) -> C,
     FS: FnMut(&N) -> bool,
 {
+    astar_with_hasher(
+        start,
+        successors,
+        heuristic,
+        success,
+        BuildHasherDefault::<FxHasher>::default(),
+    )
+}
+
+/// Compute a shortest path using the [A* search
+/// algorithm](https://en.wikipedia.org/wiki/A*_search_algorithm) using a custom hasher.
+///
+/// The shortest path starting from `start` up to a node for which `success` returns `true` is
+/// computed and returned along with its total cost, in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor. This cost must be non-negative.
+/// - `heuristic` returns an approximation of the cost from a given node to the goal. The
+///   approximation must not be greater than the real cost, or a wrong shortest path may be returned.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+#[expect(clippy::missing_panics_doc)]
+pub fn astar_with_hasher<N, C, FN, IN, FH, FS, S>(
+    start: &N,
+    mut successors: FN,
+    mut heuristic: FH,
+    mut success: FS,
+    hasher: S
+) -> Option<(Vec<N>, C)>
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FH: FnMut(&N) -> C,
+    FS: FnMut(&N) -> bool,
+    S: BuildHasher
+{
     let mut to_see = BinaryHeap::new();
     to_see.push(SmallestCostHolder {
         estimated_cost: Zero::zero(),
         cost: Zero::zero(),
         index: 0,
     });
-    let mut parents: FxIndexMap<N, (usize, C)> = FxIndexMap::default();
+    let mut parents: IndexMap<N, (usize, C), S> = IndexMap::<_, _, S>::with_hasher(hasher);
     parents.insert(start.clone(), (usize::MAX, Zero::zero()));
     while let Some(SmallestCostHolder { cost, index, .. }) = to_see.pop() {
         let successors = {

@@ -1,11 +1,12 @@
 //! Compute a path using the [depth-first search
 //! algorithm](https://en.wikipedia.org/wiki/Depth-first_search).
 
-use std::collections::HashSet;
-use std::hash::Hash;
+use std::collections::HashMap;
+use std::{collections::HashSet, hash::BuildHasher};
+use std::hash::{BuildHasherDefault, Hash};
 use std::iter::FusedIterator;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHasher};
 
 /// Compute a path using the [depth-first search
 /// algorithm](https://en.wikipedia.org/wiki/Depth-first_search).
@@ -46,16 +47,43 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// assert_eq!(dfs(1, |&n| vec![n*n, n+1].into_iter().filter(|&x| x <= 17), |&n| n == 17),
 ///            Some(vec![1, 2, 4, 16, 17]));
 /// ```
-pub fn dfs<N, FN, IN, FS>(start: N, mut successors: FN, mut success: FS) -> Option<Vec<N>>
+pub fn dfs<N, FN, IN, FS>(start: N, successors: FN, success: FS) -> Option<Vec<N>>
 where
     N: Clone + Eq + Hash,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = N>,
     FS: FnMut(&N) -> bool,
 {
+    dfs_with_hasher(start, successors, success, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Compute a path using the [depth-first search
+/// algorithm](https://en.wikipedia.org/wiki/Depth-first_search) with a custom hasher.
+///
+/// The path starts from `start` up to a node for which `success`
+/// returns `true` is computed and returned along with its total cost,
+/// in a `Some`. If no path can be found, `None` is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, which will be tried in order.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node. Note that the start node ownership
+/// is taken by `dfs` as no clones are made.
+pub fn dfs_with_hasher<N, FN, IN, FS, H>(start: N, mut successors: FN, mut success: FS, hasher: H) -> Option<Vec<N>>
+where
+    N: Clone + Eq + Hash,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = N>,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher + Clone,
+{
     let mut to_visit = vec![start];
-    let mut visited = FxHashSet::default();
-    let mut parents = FxHashMap::default();
+    let mut visited = HashSet::with_hasher(hasher.clone());
+    let mut parents = HashMap::with_hasher(hasher);
     while let Some(node) = to_visit.pop() {
         if visited.insert(node.clone()) {
             if success(&node) {
@@ -77,9 +105,10 @@ where
     None
 }
 
-fn build_path<N>(mut node: N, parents: &FxHashMap<N, N>) -> Vec<N>
+fn build_path<N, H>(mut node: N, parents: &HashMap<N, N, H>) -> Vec<N>
 where
     N: Clone + Eq + Hash,
+    H: BuildHasher,
 {
     let mut path = vec![node.clone()];
     while let Some(parent) = parents.get(&node).cloned() {

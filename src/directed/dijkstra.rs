@@ -4,11 +4,12 @@
 use super::reverse_path;
 use crate::FxIndexMap;
 use indexmap::map::Entry::{Occupied, Vacant};
+use indexmap::IndexMap;
 use num_traits::Zero;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHasher;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
-use std::hash::Hash;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 
 /// Compute a shortest path using the [Dijkstra search
 /// algorithm](https://en.wikipedia.org/wiki/Dijkstra's_algorithm).
@@ -70,8 +71,8 @@ use std::hash::Hash;
 /// ```
 pub fn dijkstra<N, C, FN, IN, FS>(
     start: &N,
-    mut successors: FN,
-    mut success: FS,
+    successors: FN,
+    success: FS,
 ) -> Option<(Vec<N>, C)>
 where
     N: Eq + Hash + Clone,
@@ -80,13 +81,47 @@ where
     IN: IntoIterator<Item = (N, C)>,
     FS: FnMut(&N) -> bool,
 {
-    dijkstra_internal(start, &mut successors, &mut success)
+    dijkstra_with_hasher(start, successors, success, BuildHasherDefault::<FxHasher>::default())
 }
 
-pub(crate) fn dijkstra_internal<N, C, FN, IN, FS>(
+/// Compute a shortest path using the [Dijkstra search
+/// algorithm](https://en.wikipedia.org/wiki/Dijkstra's_algorithm) with a custom hasher.
+///
+/// The shortest path starting from `start` up to a node for which `success` returns `true` is
+/// computed and returned along with its total cost, in a `Some`. If no path can be found, `None`
+/// is returned instead.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor. This cost must be non-negative.
+/// - `success` checks whether the goal has been reached. It is not a node as some problems require
+///   a dynamic solution instead of a fixed node.
+///
+/// A node will never be included twice in the path as determined by the `Eq` relationship.
+///
+/// The returned path comprises both the start and end node.
+pub fn dijkstra_with_hasher<N, C, FN, IN, FS, H>(
+    start: &N,
+    mut successors: FN,
+    mut success: FS,
+    hasher: H,
+) -> Option<(Vec<N>, C)>
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher,
+{
+    dijkstra_internal(start, &mut successors, &mut success, hasher)
+}
+
+pub(crate) fn dijkstra_internal<N, C, FN, IN, FS, H>(
     start: &N,
     successors: &mut FN,
     success: &mut FS,
+    hasher: H
 ) -> Option<(Vec<N>, C)>
 where
     N: Eq + Hash + Clone,
@@ -94,8 +129,9 @@ where
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = (N, C)>,
     FS: FnMut(&N) -> bool,
+    H: BuildHasher,
 {
-    let (parents, reached) = run_dijkstra(start, successors, success);
+    let (parents, reached) = run_dijkstra(start, successors, success, hasher);
     reached.map(|target| {
         (
             reverse_path(&parents, |&(p, _)| p, target),
@@ -142,14 +178,39 @@ where
 /// assert_eq!(reachables[&8], (4, 30));  // 1 -> 2 -> 4 -> 8
 /// assert_eq!(reachables[&9], (4, 30));  // 1 -> 2 -> 4 -> 9
 /// ```
-pub fn dijkstra_all<N, C, FN, IN>(start: &N, successors: FN) -> HashMap<N, (N, C)>
+pub fn dijkstra_all<N, C, FN, IN>(start: &N, successors: FN) -> HashMap<N, (N, C), BuildHasherDefault<FxHasher>>
 where
     N: Eq + Hash + Clone,
     C: Zero + Ord + Copy,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = (N, C)>,
 {
-    dijkstra_partial(start, successors, |_| false).0
+    dijkstra_all_with_hasher(start, successors, BuildHasherDefault::<FxHasher>::default())    
+}
+
+/// Determine all reachable nodes from a starting point as well as the
+/// minimum cost to reach them and a possible optimal parent node
+/// using the [Dijkstra search
+/// algorithm](https://en.wikipedia.org/wiki/Dijkstra's_algorithm) with a custom hasher.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor.
+///
+/// The result is a map where every reachable node (not including `start`) is associated with
+/// an optimal parent node and a cost from the start node.
+///
+/// The [`build_path`] function can be used to build a full path from the starting point to one
+/// of the reachable targets.
+pub fn dijkstra_all_with_hasher<N, C, FN, IN, H>(start: &N, successors: FN, hasher: H) -> HashMap<N, (N, C), H>
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    H: BuildHasher + Default,
+{
+    dijkstra_partial_with_hasher(start, successors, |_| false, hasher).0
 }
 
 /// Determine some reachable nodes from a starting point as well as the minimum cost to
@@ -171,9 +232,9 @@ where
 #[expect(clippy::missing_panics_doc)]
 pub fn dijkstra_partial<N, C, FN, IN, FS>(
     start: &N,
-    mut successors: FN,
-    mut stop: FS,
-) -> (HashMap<N, (N, C)>, Option<N>)
+    successors: FN,
+    stop: FS
+) -> (HashMap<N, (N, C), BuildHasherDefault<FxHasher>>, Option<N>)
 where
     N: Eq + Hash + Clone,
     C: Zero + Ord + Copy,
@@ -181,7 +242,42 @@ where
     IN: IntoIterator<Item = (N, C)>,
     FS: FnMut(&N) -> bool,
 {
-    let (parents, reached) = run_dijkstra(start, &mut successors, &mut stop);
+    dijkstra_partial_with_hasher(start, successors, stop, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Determine some reachable nodes from a starting point as well as the minimum cost to
+/// reach them and a possible optimal parent node
+/// using the [Dijkstra search algorithm](https://en.wikipedia.org/wiki/Dijkstra's_algorithm)
+/// with a custom hasher.
+///
+/// - `start` is the starting node.
+/// - `successors` returns a list of successors for a given node, along with the cost for moving
+///   from the node to the successor.
+/// - `stop` is a function which is called every time a node is examined (including `start`).
+///   A `true` return value will stop the algorithm.
+///
+/// The result is a map where every node examined before the algorithm stopped (not including
+/// `start`) is associated with an optimal parent node and a cost from the start node, as well
+/// as the node which caused the algorithm to stop if any.
+///
+/// The [`build_path`] function can be used to build a full path from the starting point to one
+/// of the reachable targets.
+#[expect(clippy::missing_panics_doc)]
+pub fn dijkstra_partial_with_hasher<N, C, FN, IN, FS, H>(
+    start: &N,
+    mut successors: FN,
+    mut stop: FS,
+    hasher: H
+) -> (HashMap<N, (N, C), H>, Option<N>)
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    FS: FnMut(&N) -> bool,
+    H: BuildHasher + Default,
+{
+    let (parents, reached) = run_dijkstra(start, &mut successors, &mut stop, hasher);
     (
         parents
             .iter()
@@ -192,24 +288,26 @@ where
     )
 }
 
-fn run_dijkstra<N, C, FN, IN, FS>(
+fn run_dijkstra<N, C, FN, IN, FS, H>(
     start: &N,
     successors: &mut FN,
     stop: &mut FS,
-) -> (FxIndexMap<N, (usize, C)>, Option<usize>)
+    hasher: H,
+) -> (IndexMap<N, (usize, C), H>, Option<usize>)
 where
     N: Eq + Hash + Clone,
     C: Zero + Ord + Copy,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = (N, C)>,
     FS: FnMut(&N) -> bool,
+    H: BuildHasher,
 {
     let mut to_see = BinaryHeap::new();
     to_see.push(SmallestHolder {
         cost: Zero::zero(),
         index: 0,
     });
-    let mut parents: FxIndexMap<N, (usize, C)> = FxIndexMap::default();
+    let mut parents: IndexMap<N, (usize, C), H> = IndexMap::with_hasher(hasher);
     parents.insert(start.clone(), (usize::MAX, Zero::zero()));
     let mut target_reached = None;
     while let Some(SmallestHolder { cost, index }) = to_see.pop() {
@@ -284,9 +382,10 @@ where
 /// assert_eq!(vec![101], build_path(&101, &parents));
 /// ```
 #[expect(clippy::implicit_hasher)]
-pub fn build_path<N, C>(target: &N, parents: &HashMap<N, (N, C)>) -> Vec<N>
+pub fn build_path<N, C, H>(target: &N, parents: &HashMap<N, (N, C), H>) -> Vec<N>
 where
     N: Eq + Hash + Clone,
+    H: BuildHasher,
 {
     let mut rev = vec![target.clone()];
     let mut next = target.clone();
@@ -324,11 +423,11 @@ impl<K: Ord> Ord for SmallestHolder<K> {
 }
 
 /// Struct returned by [`dijkstra_reach`].
-pub struct DijkstraReachable<N, C, FN> {
+pub struct DijkstraReachable<N, C, FN, H> {
     to_see: BinaryHeap<SmallestHolder<C>>,
-    seen: FxHashSet<usize>,
+    seen: HashSet<usize, H>,
     parents: FxIndexMap<N, (usize, C)>,
-    total_costs: FxHashMap<N, C>,
+    total_costs: HashMap<N, C, H>,
     successors: FN,
 }
 
@@ -344,12 +443,13 @@ pub struct DijkstraReachableItem<N, C> {
     pub total_cost: C,
 }
 
-impl<N, C, FN, IN> Iterator for DijkstraReachable<N, C, FN>
+impl<N, C, FN, IN, H> Iterator for DijkstraReachable<N, C, FN, H>
 where
     N: Eq + Hash + Clone,
     C: Zero + Ord + Copy + Hash,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = (N, C)>,
+    H: BuildHasher
 {
     type Item = DijkstraReachableItem<N, C>;
 
@@ -406,12 +506,29 @@ where
 ///
 /// The `successors` function receives the current node, and returns
 /// an iterator of successors associated with their move cost.
-pub fn dijkstra_reach<N, C, FN, IN>(start: &N, successors: FN) -> DijkstraReachable<N, C, FN>
+pub fn dijkstra_reach<N, C, FN, IN>(start: &N, successors: FN) -> DijkstraReachable<N, C, FN, BuildHasherDefault<FxHasher>>
 where
     N: Eq + Hash + Clone,
     C: Zero + Ord + Copy,
     FN: FnMut(&N) -> IN,
     IN: IntoIterator<Item = (N, C)>,
+{
+    dijkstra_reach_with_hasher(start, successors, BuildHasherDefault::<FxHasher>::default())
+}
+
+/// Visit all nodes that are reachable from a start node. The node
+/// will be visited in order of cost, with the closest nodes first.
+///
+/// The `successors` function receives the current node, and returns
+/// an iterator of successors associated with their move cost with
+/// a custom hasher.
+pub fn dijkstra_reach_with_hasher<N, C, FN, IN, H>(start: &N, successors: FN, hasher: H) -> DijkstraReachable<N, C, FN, H>
+where
+    N: Eq + Hash + Clone,
+    C: Zero + Ord + Copy,
+    FN: FnMut(&N) -> IN,
+    IN: IntoIterator<Item = (N, C)>,
+    H: BuildHasher + Clone,
 {
     let mut to_see = BinaryHeap::new();
     to_see.push(SmallestHolder {
@@ -422,10 +539,10 @@ where
     let mut parents: FxIndexMap<N, (usize, C)> = FxIndexMap::default();
     parents.insert(start.clone(), (usize::MAX, Zero::zero()));
 
-    let mut total_costs = FxHashMap::default();
+    let mut total_costs = HashMap::with_hasher(hasher.clone());
     total_costs.insert(start.clone(), Zero::zero());
 
-    let seen = FxHashSet::default();
+    let seen = HashSet::with_hasher(hasher);
 
     DijkstraReachable {
         to_see,

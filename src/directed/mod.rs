@@ -1,7 +1,8 @@
 //! Algorithms for directed graphs.
 
-use super::FxIndexMap;
-use std::hash::Hash;
+use indexmap::IndexMap;
+
+use std::hash::{BuildHasher, Hash};
 
 pub mod astar;
 pub mod bfs;
@@ -17,10 +18,11 @@ pub mod strongly_connected_components;
 pub mod topological_sort;
 pub mod yen;
 
-fn reverse_path<N, V, F>(parents: &FxIndexMap<N, V>, mut parent: F, start: usize) -> Vec<N>
+fn reverse_path<N, V, F, S>(parents: &IndexMap<N, V, S>, mut parent: F, start: usize) -> Vec<N>
 where
     N: Eq + Hash + Clone,
-    F: FnMut(&V) -> usize,
+    F: FnMut(&V) -> usize,    
+    S: BuildHasher
 {
     let mut i = start;
     let path = std::iter::from_fn(|| {
